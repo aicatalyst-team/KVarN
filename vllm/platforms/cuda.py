@@ -259,7 +259,6 @@ class CudaPlatformBase(Platform):
             model_config is not None
             and isinstance(cache_dtype, str)
             and cache_dtype.startswith("kvarn_")
-            and torch.cuda.is_available()
         ):
             from vllm.model_executor.layers.quantization.kvarn.config import (
                 KVarNConfig,
@@ -268,7 +267,10 @@ class CudaPlatformBase(Platform):
             kvarn_cfg = KVarNConfig.from_cache_dtype(
                 cache_dtype, model_config.get_head_size()
             )
-            total_gpu_bytes = torch.cuda.get_device_properties(0).total_memory
+            # Query total GPU memory via NVML (cls.get_device_total_memory) so we
+            # do NOT initialize a CUDA context in the parent here — doing so would
+            # force `spawn` multiprocessing for tensor parallelism.
+            total_gpu_bytes = cls.get_device_total_memory()
             supported = kvarn_cfg.max_supported_seqs(
                 total_gpu_bytes=total_gpu_bytes,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
