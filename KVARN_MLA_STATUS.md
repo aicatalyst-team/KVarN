@@ -62,3 +62,35 @@ dims) + keep the decoupled RoPE part fp16. Dev model: DeepSeek-V2-Lite
 Method + savings + dequant kernel = proven. 3a/3b = substantial multi-session
 vLLM-MLA integration + kernel surgery (paged cache, block tables, spec,
 backend, selection, then fused attention). Resume from here.
+
+## Overnight findings (morning summary)
+
+VALIDATED PRIMITIVES (all real, tested on sm_120):
+- Per-token Hadamard+RTN quant of the 512-latent (mla_quant.py): record=388 B
+  vs 1152 fp16 = **2.97x**, latent cos 0.9921, RoPE exact. Streaming (no pool),
+  and CUDA-graph-safe (matmul/min-max/round/bitops only — no Sinkhorn host-sync).
+- Triton dequant kernel D=512 (ckpt2): cos 1.0 vs ref.
+- Accuracy probe (Sinkhorn path): coherent at 4/2-bit (enforce_eager only —
+  Sinkhorn's iterative ops break CUDA-graph capture; per-token path avoids this).
+- BASELINE V2-Lite MLA burst (FP16, cudagraph): **3080 tok/s, cap 1,858,368 tok**.
+
+KEY REGIME FINDING (why a burst SPEED win isn't visible here):
+- MLA's latent cache is already tiny (1152 B/token), so on small V2-Lite the KV
+  capacity is enormous (1.86M tok) — the burst (~147k tok) is nowhere near
+  memory-bound. KVarN-MLA's ~3x savings raises capacity to ~5.5M but that does
+  NOT raise throughput when not capacity-bound; materialize would only add
+  dequant overhead. Same lesson as standard KVarN: capacity->throughput only in
+  the memory-bound regime (large MLA model / very long context). Those (V3/V4,
+  600B+) don't fit on 2x sm_120, so a burst speed WIN can't be demonstrated on
+  this box. What we CAN show here: end-to-end correctness + real capacity (savings).
+
+REMAINING BUILD (materialize backend) is genuine multi-session vLLM-MLA
+integration (cache spec + packed layout + store hook + paged decode + selection)
+— do_kv_cache_update is defined on the MLA impl base; the decode reads the paged
+cache via the attention kernel (gather/dequant or fused). Not reliably
+landable unattended overnight, and would not show a speed win on V2-Lite anyway.
+
+RECOMMENDATION: the honest result is "KVarN-MLA works; ~3x latent compression;
+speed win needs the fused kernel + a memory-bound regime (big MLA model)". For a
+real speed number we'd want a large MLA model on enough GPUs, or accept the
+correctness+savings result on V2-Lite.
