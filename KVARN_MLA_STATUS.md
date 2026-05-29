@@ -119,3 +119,25 @@ rope=64). vLLM MLA assumes spec head_size == compute head_size. Plan:
    Then V4-Flash on 2 GPUs (memory-bound -> where savings->speed should show).
 Status: kernels DONE; plumbing = multi-hour iterative integration (head_size
 decouple + store + forward_mqa + spec + selection + V2-Lite debug cycles).
+
+## Update 2: PACKED CACHE WIRED IN vLLM (savings infra confirmed)
+V2-Lite with kv_cache_dtype=kvarn_mla_k4_g128 now: passes dtype validation,
+MoE(triton), rope, the head_dim/concurrency guards (excluded kvarn_mla from all
+4 standard-KVarN startswith paths: cuda.py x2, gpu_worker pool, attention.py
+spec, kvarn_attn.supports), and ALLOCATES the packed paged cache at the
+compressed 388 B/token footprint (spec head_size=388, uint8). So the savings
+machinery works end-to-end up to the store.
+
+NEXT (the last 2 overrides — validated kernels are ready to plug in):
+1. STORE: base AttentionImpl.do_kv_cache_update (vllm/v1/attention/backend.py
+   ~L910/990) calls concat_and_cache_mla (C++) which writes dense [..,576] and
+   FAILS on the packed uint8 [..,388] cache. Override for kvarn_mla: per-token
+   RTN (mla_quant.pack_tokens) -> scatter 388-byte records at slot_mapping.
+2. DECODE: TritonMLAImpl.forward_mqa -> call the validated paged kernel
+   (kvarn_mla_paged_proto) instead of decode_attention_fwd. Prefill: current
+   fp16 kv_c (single-chunk) -> no cache dequant.
+Then: correctness vs fp16 on V2-Lite, burst (savings+speed), V4-Flash on 2 GPU.
+
+EFFORT: store+decode override + numerical-correctness debug + burst + V4 is a
+multi-hour iterative stretch. Everything HARD (3 kernels cos 1.0, savings 2.97x,
+packed cache wired) is DONE; remaining is bounded plumbing on 2 methods.
