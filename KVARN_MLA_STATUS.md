@@ -439,3 +439,17 @@ CORRECT batched + multi-block. GENERALITY TODOs for the production backend:
 shared-block (prefix cache) + split-block (chunked prefill) support, and CUDA
 graphs (move flush to builder + dequant Triton kernel -> stock decode). Final
 NQ=150 accuracy [running]. Eager decode is slow -> graphs are the speed work.
+
+## Update 20: FULL METHOD VALIDATED NEAR-LOSSLESS (the deliverable)
+GSM8K V2-Lite NQ=150 (8-shot, eager, prefix+chunked off), full KVarN method
+(Hadamard + Sinkhorn + per-channel RTN, int4 tile cache, 2.87x compression):
+  FP16:            37.33% (56/150)
+  full KVarN-MLA:  38.67% (58/150)  -> within noise => NEAR-LOSSLESS at 4-bit.
+The real KVarN method (WITH Sinkhorn) runs correctly end-to-end in vLLM on MLA,
+batched + multi-block, compressed int4 tile cache. This is what the user asked
+for: full method, not the RTN shortcut.
+REMAINING (now purely speed + generality, correctness done):
+- CUDA graphs: move Sinkhorn flush to the metadata builder (eager, between
+  replays) + dequant Triton kernel -> stock TritonMLA decode + sink/tail +
+  capture-correct metadata. (Eager per-seq decode currently slow.)
+- Generality: shared-block (prefix caching) + split-block (chunked prefill).
