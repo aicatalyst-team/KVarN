@@ -296,3 +296,15 @@ WORKING LAUNCH RECIPE (gets to the DeepGEMM wall; everything else runs on sm_120
   patch support_deep_gemm() (cuda.py) to include family(120) -- but it then faults
   in DeepGEMM's C++ as above. deep_gemm 2.5.0 installed in .venv via
   tools/install_deepgemm.sh (ref 891d57b) built with cuda-12.9.
+
+## Update 11: GSM8K accuracy -- V2-Lite FP16 vs KVarN-MLA 4-bit
+8-shot CoT, greedy, full test set (1319), identical harness (0 extraction-None;
+sample 26/80 matches full):
+  FP16:            30.78% (406/1319)
+  KVarN-MLA 4-bit: 27.82% (367/1319)
+=> 4-bit costs ~3.0pp (9.6% rel), ~2.3 SE -> real but modest. (FP16 ~31% vs the
+paper's ~41% = base model + 400-tok cap truncating some CoT; comparison is fair
+since both share the harness.) CAVEAT: MLA path is per-token RTN ONLY -- no
+Hadamard, no Sinkhorn (eager-only MLA work; Sinkhorn breaks CUDA-graph). So 3pp
+is the RTN-only FLOOR; full KVarN (had+sinkhorn) would likely recover most of it.
+GSM8K chosen over AIME (AIME floors a 2.4B-active model). Harness: /tmp/v2lite_gsm8k.py.
