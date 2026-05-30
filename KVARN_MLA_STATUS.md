@@ -270,3 +270,29 @@ Building DeepGEMM with cuda-12.9 now; open risk = DeepGEMM is Hopper-oriented, s
 support unverified. Launch recipe so far:
   PATH=/usr/local/cuda-12.9/bin:$PATH CUDA_HOME=/usr/local/cuda-12.9
   kv_cache_dtype=fp8, TP=2, trust_remote_code, NO forced moe_backend.
+
+## Update 10: V4-Flash FINAL -- true blocker = DeepGEMM has no sm_120 kernels
+Walked the V4-Flash failure all the way down. It is NOT impossible/MoE-blocked
+(Update 6 was wrong). On 2x RTX PRO 6000 Blackwell (sm_120) it loads FULLY:
+MARLIN FP4 MoE, FP8 Lightning Indexer, DEEPSEEK_SPARSE_SWA, TileLang hc kernel
+(needs cuda-12.9 on PATH). The ONLY remaining blocker is V4's FP8 block-scaled
+GEMM + HyperConnection ("hc") compression, which must go through DeepGEMM:
+  - cutlass fallback: torch-stable-ABI op can't accept the ue8m0 scale dtype
+    (ScalarType 44) -> "Not yet supported ScalarType 44".
+  - DeepGEMM 2.5.0 (built fine for sm_120a, installed): explicitly asserts
+    "Unsupported architecture" on sm_120 in TWO C++ kernels --
+    csrc/apis/layout.hpp:59 (SF transform) and csrc/apis/hyperconnection.hpp:56.
+    Its kernels are written for sm_90 (Hopper) / sm_100 (B200) only.
+  - flashinfer 0.6.11: has_flashinfer_fp8_blockscale_gemm()=False (no path).
+=> V4-Flash needs sm_90/sm_100 (your H200 run) OR a DeepGEMM port to sm_120 OR a
+   vLLM cutlass build that handles ue8m0. NOT runnable on this sm_120 box without
+   DeepGEMM kernel work. This is a SOFTWARE coverage gap, not "MXFP4 impossible".
+
+WORKING LAUNCH RECIPE (gets to the DeepGEMM wall; everything else runs on sm_120):
+  PATH=/usr/local/cuda-12.9/bin:$PATH  CUDA_HOME=/usr/local/cuda-12.9
+  LLM(model=V4-Flash, trust_remote_code=True, tensor_parallel_size=2,
+      kv_cache_dtype="fp8", enforce_eager=True)   # do NOT force moe_backend
+  (MARLIN FP4 MoE auto-selected.) To even attempt DeepGEMM on sm_120 you must also
+  patch support_deep_gemm() (cuda.py) to include family(120) -- but it then faults
+  in DeepGEMM's C++ as above. deep_gemm 2.5.0 installed in .venv via
+  tools/install_deepgemm.sh (ref 891d57b) built with cuda-12.9.
