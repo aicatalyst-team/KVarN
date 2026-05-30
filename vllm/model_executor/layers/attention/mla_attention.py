@@ -544,6 +544,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 _encode_layer_name(self.layer_name),
             )
 
+        # LOCAL ACCURACY PROBE (env KVARN_MLA_BITS): round-trip the MLA latent
+        # through the FULL KVarN recipe (Hadamard -> Sinkhorn -> asymmetric RTN
+        # -> dequant -> invert). Applied HERE (before do_kv_cache_update) so the
+        # lossy latent is what gets cached -> all attention (prefill + decode,
+        # past + current) sees KVarN-quantized values. No-op unless the env set.
+        from vllm.model_executor.layers.quantization.kvarn.mla_probe import (
+            kvarn_mla_roundtrip,
+            mla_bits,
+        )
+
+        _kvarn_bits = mla_bits()
+        if _kvarn_bits:
+            kv_c_normed = kvarn_mla_roundtrip(kv_c_normed, _kvarn_bits)
+
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata_raw = forward_context.attn_metadata
@@ -617,18 +631,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
-        # LOCAL EXPERIMENT (env KVARN_MLA_BITS): round-trip the MLA latent
-        # through KVarN quantization to measure its accuracy impact. No-op
-        # unless KVARN_MLA_BITS is set. Quantizing k_c_normed here makes both
-        # the cached latent and the current-step attention use the lossy value.
-        from vllm.model_executor.layers.quantization.kvarn.mla_probe import (
-            kvarn_mla_roundtrip,
-            mla_bits,
-        )
-
-        _kvarn_mla_bits = mla_bits()
-        if _kvarn_mla_bits:
-            k_c_normed = kvarn_mla_roundtrip(k_c_normed, _kvarn_mla_bits)
+        # NOTE: the KVarN MLA accuracy probe is applied at the top of forward()
+        # (before do_kv_cache_update) so the cached latent is the lossy one.
+        # It is intentionally NOT re-applied here (would double-quantize).
 
         quant_key = _detect_output_quant_key(
             output, output_scale, output_block_scale, self.num_heads * self.v_head_dim
