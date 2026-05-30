@@ -332,3 +332,20 @@ False works, decode kernel + per-token store are graph-safe). So a fast KVarN-ML
 + eager periodic Sinkhorn chunk-flush + small FP16 residual for unflushed tokens.
 Deciding next via real-latent fidelity whether Sinkhorn is needed at 4-bit or
 Hadamard+RTN (fully graph-safe, no flush machinery) already suffices.
+
+## Update 13: DECISIVE -- Hadamard/Sinkhorn are ~inert on the MLA latent
+Real V2-Lite prefill latent (773 tok, per-ch std 0.010..1.035), deterministic
+round-trip cosine (full variant uses the REAL kvarn variance_normalize):
+  4-bit:  RTN-only 0.99667 | Hadamard+RTN 0.99681 | full KVarN 0.99681
+  2-bit:  RTN-only 0.92802 | Hadamard+RTN 0.92926 | full KVarN 0.92926
+=> Sinkhorn adds 0.00000 over Hadamard+RTN; Hadamard adds +0.00014 over RTN.
+Both far below the ~5pp GSM8K noise floor. REASON: the MLA latent is kv_c_NORMED
+(RMSNorm-whitened) -> already balanced, no heavy-tailed outlier channels, so the
+real variance_normalize early-stops to ~identity. KVarN's machinery targets raw
+K/V outliers, which MLA's normed latent doesn't have.
+CONSEQUENCE (resolves "want Had+Sinkhorn AND cuda graphs"): no conflict on MLA --
+Sinkhorn is inert, so the GRAPH-SAFE RTN backend (already captures CUDA graphs,
+near-lossless 4-bit) is full-KVarN-EQUIVALENT. Building the eager-flush Sinkhorn
+machinery would add large complexity + break clean hot-path capture for ~0 gain.
+RECOMMENDATION: ship the CUDA-graph RTN backend; optionally add Hadamard (graph-
+safe static matmul, +0.0001, gives the "KVarN rotation"); skip Sinkhorn on MLA.
