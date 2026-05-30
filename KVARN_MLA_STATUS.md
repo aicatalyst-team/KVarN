@@ -393,3 +393,18 @@ Phase3 dequant Triton kernel vs unpack_tile (cos 1.0, lat 2.2e-4, rope exact).
 REMAINING = stateful backend plumbing: tile-store buffering + 128-tok flush
 (do_kv_cache_update), fp16 sink/tail + pool, paged fp16 scratch + dequant wiring,
 capture-correct metadata. Port of kvarn_attn machinery to MLA; multi-iteration.
+
+## Update 17: FULL METHOD WORKS END-TO-END (eager) on V2-Lite
+Built the real KVarN method on the kvarn_mla path (NO RTN shortcut, per user):
+- do_kv_cache_update: fp16 per-block staging (self._kvarn_stage); on 128-token
+  fill -> _kvarn_flush_tile (Hadamard + REAL variance_normalize Sinkhorn +
+  per-channel asymmetric RTN) writes the int4 tile record to the cache.
+- forward_mqa: eager per-sequence decode -> gather rotated keys from flushed int4
+  tiles (dequant) + staged fp16 partial blocks, dot Hadamard-rotated query,
+  softmax, un-rotate output. lse computed for prefill-merge.
+- spec: head_size=402 (tile REC/group), block_size forced 128.
+Smoke (short prompt): coherent output ("Paris. The currency of France is the
+Euro..."). Prefill self-attn uses in-memory fp16 (recent-tokens-fp16, correct).
+Tasks 47+48 done. REMAINING: GSM8K full-method accuracy [running], then CUDA
+graphs (move flush to builder + dequant Triton kernel -> stock decode + sink/tail
++ capture metadata) -- the eager per-seq decode is correct but slow.
