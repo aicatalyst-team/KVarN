@@ -626,6 +626,12 @@ class CudaPlatformBase(Platform):
     @classmethod
     def support_deep_gemm(cls) -> bool:
         """Currently, only Hopper and Blackwell GPUs are supported."""
+        # NOTE: sm_120 (consumer Blackwell) is intentionally excluded: DeepGEMM
+        # 2.5.0 explicitly asserts "Unsupported architecture" on sm_120 in its
+        # SF-layout (csrc/apis/layout.hpp:59) and HyperConnection
+        # (csrc/apis/hyperconnection.hpp:56) kernels. (Verified for V4-Flash;
+        # adding `or cls.is_device_capability_family(120)` here routes to DeepGEMM
+        # which then faults in those C++ kernels.)
         return cls.is_device_capability(90) or cls.is_device_capability_family(100)
 
     @classmethod
