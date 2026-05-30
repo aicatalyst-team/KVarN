@@ -244,3 +244,29 @@ At batch=1 the decode-attention kernel is a SMALL fraction of per-token latency
 gain, not worth the stage1/stage2 complexity. At high batch (burst) occupancy is
 already saturated (B*H programs). => BLOCK_N tiling was the right + sufficient
 kernel optimization. KV-splits abandoned (empirically low-value). KERNEL DONE.
+
+## Update 9: CORRECTION to Update 6 -- V4-Flash IS runnable here (user was right)
+Update 6's "hardware-blocked / cannot load natively" was WRONG. It came from two
+mistakes in my probe, not real limitations:
+  (a) I force-set kernel_config={'moe_backend':'triton'} (carried over from the
+      V2-Lite sm_120 MoE workaround). For V4's FP4 experts that routes through the
+      triton mxfp4 path, which genuinely doesn't support sm_120. UNFORCED, the
+      mxfp4 oracle auto-picks MARLIN, which works on Blackwell. (FLASHINFER_TRTLLM
+      / MARLIN / DEEPGEMM are the valid mxfp4 backends; triton is not one.)
+  (b) nvcc 11.5 was on PATH; TileLang compiled V4's "hc" (Hadamard-compression)
+      sparse kernel for sm_120a and 11.5 rejected it ("Value 'sm_120a' is not
+      defined"). Putting /usr/local/cuda-12.9 on PATH (CUDA_HOME too) fixes it
+      (12.9 supports sm_120a; verified by a standalone -arch=sm_120a compile).
+With (a)+(b), V4-Flash on 2x RTX PRO 6000 Blackwell (sm_120, 96GB each) loads
+FULLY: 149GB fp8 weights, MARLIN FP4 MoE, FP8 Lightning Indexer, DEEPSEEK_SPARSE_
+SWA KV cache, TileLang hc kernel all initialize. It then fails ONLY in the profile
+forward pass at an FP8 block-scaled DENSE linear (fp8.py -> BlockScaledMMLinear ->
+cutlass_scaled_mm): "Not yet supported ScalarType 44" -- the ue8m0 scale dtype
+can't cross this prebuilt vLLM's torch-stable-ABI cutlass op. flashinfer block-
+scale fp8 gemm is unavailable here (has_flashinfer_fp8_blockscale_gemm()=False on
+flashinfer 0.6.11), so it falls back to the broken cutlass path. Canonical fix =
+DeepGEMM (env.txt forced exactly this via VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0).
+Building DeepGEMM with cuda-12.9 now; open risk = DeepGEMM is Hopper-oriented, sm_120
+support unverified. Launch recipe so far:
+  PATH=/usr/local/cuda-12.9/bin:$PATH CUDA_HOME=/usr/local/cuda-12.9
+  kv_cache_dtype=fp8, TP=2, trust_remote_code, NO forced moe_backend.
