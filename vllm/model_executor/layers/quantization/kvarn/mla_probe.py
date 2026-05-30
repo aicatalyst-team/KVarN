@@ -52,6 +52,10 @@ def kvarn_mla_roundtrip(latent: torch.Tensor, bits: int, group: int = 128) -> to
         kvarn_mla_roundtrip._logged = True
         print(f"[KVARN-MLA] probe ACTIVE: bits={bits} on latent {tuple(latent.shape)}",
               flush=True)
+        _dump = os.environ.get("KVARN_MLA_DUMP")
+        if _dump and latent.reshape(-1, latent.shape[-1]).shape[0] > 16:
+            torch.save(latent.reshape(-1, latent.shape[-1]).detach().cpu(), _dump)
+            print(f"[KVARN-MLA] dumped real latent to {_dump}", flush=True)
     orig_shape = latent.shape
     R = orig_shape[-1]
     x = latent.reshape(-1, R).float()

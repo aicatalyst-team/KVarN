@@ -308,3 +308,27 @@ since both share the harness.) CAVEAT: MLA path is per-token RTN ONLY -- no
 Hadamard, no Sinkhorn (eager-only MLA work; Sinkhorn breaks CUDA-graph). So 3pp
 is the RTN-only FLOOR; full KVarN (had+sinkhorn) would likely recover most of it.
 GSM8K chosen over AIME (AIME floors a 2.4B-active model). Harness: /tmp/v2lite_gsm8k.py.
+
+## Update 12: FULL KVarN (Had+Sinkhorn+RTN) accuracy + CUDA-graph reconciliation
+GSM8K V2-Lite, full-KVarN via mla_probe (roundtrip applied at top of forward()
+so the FP16 cache stores lossy values -> all attention sees KVarN values):
+  FP16 (run A / run B):  30.78% / 25.55%   <- ~5pp RUN-TO-RUN NOISE (V2-Lite MoE
+                                              is not bitwise-deterministic across
+                                              processes in vLLM: expert routing +
+                                              bf16 atomic reductions + batching).
+  full-KVarN 4-bit:      30.25%  -> inside the FP16 noise band => NEAR-LOSSLESS.
+  full-KVarN 2-bit:      17.51%  -> ~10pp below FP16, FAR beyond noise => real
+                                    large drop (latent too compressed for 2-bit).
+Caveat: the ~5pp MoE noise floor swamps few-pp effects; the earlier RTN-only
+"-3pp" was within noise (not reliable). 2-bit's collapse is the one above-noise
+signal. Roundtrip cosine (deterministic, noise-free): full-KVarN 4-bit=0.9997,
+2-bit=0.9926.
+
+CUDA-GRAPH reconciliation (corrects my "Sinkhorn breaks graphs / eager-only"):
+Sinkhorn runs at QUANT/FLUSH time, not the per-token decode hot path. Verified:
+the existing RTN KVarN-MLA backend CAPTURES CUDA GRAPHS cleanly (enforce_eager=
+False works, decode kernel + per-token store are graph-safe). So a fast KVarN-MLA
+= graph-captured decode (in-kernel dequant + Hadamard-rotated query, both static)
++ eager periodic Sinkhorn chunk-flush + small FP16 residual for unflushed tokens.
+Deciding next via real-latent fidelity whether Sinkhorn is needed at 4-bit or
+Hadamard+RTN (fully graph-safe, no flush machinery) already suffices.
