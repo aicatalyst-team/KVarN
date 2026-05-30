@@ -980,19 +980,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype, vllm_config.model_config
         )
         head_size = self.head_size
-        # KVarN-MLA: the cache stores a PACKED per-token record (uint8), not the
-        # 576 fp16 latent+rope. Record layout (16-byte-aligned fields so the
-        # decode kernel's gathered fp16 loads vectorize) is computed by
-        # kvarn_mla_layout. Setting the spec head_size to that byte count
-        # (dtype uint8) sizes the paged cache to the compressed footprint;
-        # compute still uses kv_lora_rank/qk_rope_head_dim.
+        block_size = vllm_config.cache_config.block_size
+        # KVarN-MLA (full method): the cache stores one PACKED int4 TILE record
+        # per block (128 tokens): Hadamard+Sinkhorn+per-channel-RTN latent +
+        # per-channel scale/zp + per-token s_row + fp16 rope. head_size =
+        # REC/group (uint8) sizes the paged cache to the compressed tile; block
+        # size is forced to the tile group (128). Compute uses kv_lora_rank.
         if str(self.kv_cache_dtype).startswith("kvarn_mla"):
-            from vllm.v1.attention.backends.mla.triton_mla import kvarn_mla_layout
+            from vllm.v1.attention.backends.mla.triton_mla import (
+                kvarn_mla_tile_layout,
+            )
             kv_lora_rank = self.head_size - self.qk_rope_head_dim
-            _, _, _, _, head_size = kvarn_mla_layout(
-                kv_lora_rank, self.qk_rope_head_dim, 4)
+            block_size = 128
+            _, _, _, _, _, _, head_size = kvarn_mla_tile_layout(
+                kv_lora_rank, self.qk_rope_head_dim, block_size, 4)
         return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=block_size,
             num_kv_heads=1,
             head_size=head_size,
             dtype=kv_cache_dtype,

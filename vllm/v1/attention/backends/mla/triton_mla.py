@@ -257,13 +257,58 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._is_kvarn_mla = str(self.kv_cache_dtype).startswith("kvarn_mla")
         if self._is_kvarn_mla:
             self._kvarn_bits = 4
+            self._kvarn_group = 128
+            # per-block fp16 staging for unflushed tokens: block_id -> dict(
+            #   lat [n,R] fp16, rope [n,ROPE] fp16). Flushed at 128-token fill via
+            #   the full KVarN tile recipe (Hadamard+Sinkhorn+per-channel RTN).
+            self._kvarn_stage: dict[int, dict] = {}
+            self._kvarn_H = None  # lazy orthonormal Hadamard [R,R]
+
+    def _kvarn_hadamard(self, n: int, device, dtype):
+        if self._kvarn_H is None:
+            H = torch.ones(1, 1, dtype=torch.float32)
+            while H.shape[0] < n:
+                H = torch.cat(
+                    [torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
+            self._kvarn_H = (H / n ** 0.5).to(device=device, dtype=torch.float32)
+        return self._kvarn_H
+
+    def _kvarn_flush_tile(self, lat, rope, kv_cache, block_id):
+        """Full KVarN tile flush: lat [G,R] fp16, rope [G,ROPE] fp16 -> write the
+        int4 tile record (Hadamard + Sinkhorn + per-channel RTN) to kv_cache[block]."""
+        from vllm.model_executor.layers.quantization.kvarn.sinkhorn import (
+            variance_normalize,
+        )
+        G, R = lat.shape
+        ROPE = rope.shape[-1]
+        bits = self._kvarn_bits
+        qmax = (1 << bits) - 1
+        NB, SC, ZP, SR, RP, REC, _ = kvarn_mla_tile_layout(R, ROPE, G, bits)
+        H = self._kvarn_hadamard(R, lat.device, lat.dtype)
+        rot = (lat.float() @ H).t().contiguous()              # [R, G] rotated frame
+        bal, s_col, s_row = variance_normalize(rot)           # s_col[1,G] s_row[R,1]
+        lo = bal.amin(1, keepdim=True); hi = bal.amax(1, keepdim=True)
+        scale = ((hi - lo) / qmax).clamp_min(1e-8)            # [R,1] per-channel
+        q = torch.clamp(torch.round((bal - lo) / scale), 0, qmax).to(torch.uint8)
+        scale_abs = (scale * s_row).squeeze(1)                # [R] (absorb per-ch sinkhorn)
+        zp_abs = (lo * s_row).squeeze(1)                      # [R]
+        per_tok = s_col.squeeze(0)                            # [G] per-token sinkhorn
+        qT = q.t().contiguous()                               # [G, R] token-major
+        packed = (qT[:, 0::2] | (qT[:, 1::2] << 4)).contiguous()
+        rec = kv_cache.view(-1, REC)[block_id]
+        rec[:NB] = packed.reshape(-1)
+        rec[SC:SC + R * 2] = scale_abs.to(torch.float16).view(torch.uint8)
+        rec[ZP:ZP + R * 2] = zp_abs.to(torch.float16).view(torch.uint8)
+        rec[SR:SR + G * 2] = per_tok.to(torch.float16).view(torch.uint8)
+        rec[RP:RP + G * ROPE * 2] = rope.reshape(-1).to(torch.float16).view(torch.uint8)
 
     def do_kv_cache_update(self, kv_c_normed, k_pe, kv_cache, slot_mapping,
                            kv_cache_dtype, k_scale):
-        """KVarN-MLA store: per-token asymmetric RTN of the latent (no Hadamard,
-        to match the validated decode kernel) + fp16 RoPE, packed into 388-byte
-        records and scattered at slot_mapping. Falls back to the dense MLA store
-        for non-kvarn dtypes."""
+        """KVarN-MLA store (full method): buffer incoming fp16 latent+rope per
+        block; when a block fills to `group` tokens, flush it via the KVarN tile
+        recipe (Hadamard + Sinkhorn + per-channel RTN) into the int4 tile cache.
+        Unflushed (partial/sink) blocks stay fp16 in self._kvarn_stage and are
+        read directly by the decode."""
         if not self._is_kvarn_mla:
             return super().do_kv_cache_update(
                 kv_c_normed, k_pe, kv_cache, slot_mapping, kv_cache_dtype, k_scale)
@@ -271,24 +316,31 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             return
         T = kv_c_normed.shape[0]
         R = kv_c_normed.shape[-1]
+        G = self._kvarn_group
         rope = k_pe.reshape(T, -1).to(torch.float16)
-        RP = rope.shape[-1]
-        bits = self._kvarn_bits
-        qmax = (1 << bits) - 1
-        NB, SC, ZP, RO, REC = kvarn_mla_layout(R, RP, bits)
-        assert REC == kv_cache.shape[-1]
-        lat = kv_c_normed.float()
-        lo = lat.amin(1, keepdim=True)
-        hi = lat.amax(1, keepdim=True)
-        scale = ((hi - lo) / qmax).clamp_min(1e-8)
-        q = torch.clamp(torch.round((lat - lo) / scale), 0, qmax).to(torch.uint8)
-        packed = (q[:, 0::2] | (q[:, 1::2] << 4)).contiguous()          # [T, NB]
-        rec = torch.zeros(T, REC, dtype=torch.uint8, device=kv_cache.device)
-        rec[:, :NB] = packed
-        rec[:, SC:SC + 2] = scale.squeeze(1).to(torch.float16).view(torch.uint8).reshape(T, 2)
-        rec[:, ZP:ZP + 2] = lo.squeeze(1).to(torch.float16).view(torch.uint8).reshape(T, 2)
-        rec[:, RO:RO + RP * 2] = rope.reshape(T, RP).view(torch.uint8).reshape(T, RP * 2)
-        kv_cache.view(-1, REC)[slot_mapping.flatten().long()] = rec
+        ROPE = rope.shape[-1]
+        lat = kv_c_normed.to(torch.float16)
+        slots = slot_mapping.flatten().long()
+        block_ids = (slots // G).tolist()
+        offsets = (slots % G).tolist()
+        stage = self._kvarn_stage
+        for i in range(T):
+            bid = block_ids[i]
+            off = offsets[i]
+            st = stage.get(bid)
+            if st is None:
+                st = {
+                    "lat": torch.zeros(G, R, dtype=torch.float16, device=lat.device),
+                    "rope": torch.zeros(G, ROPE, dtype=torch.float16, device=lat.device),
+                    "filled": torch.zeros(G, dtype=torch.bool, device=lat.device),
+                }
+                stage[bid] = st
+            st["lat"][off] = lat[i]
+            st["rope"][off] = rope[i]
+            st["filled"][off] = True
+            if bool(st["filled"].all()):
+                self._kvarn_flush_tile(st["lat"], st["rope"], kv_cache, bid)
+                del stage[bid]
 
     def forward_mqa(
         self,
@@ -312,21 +364,62 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
         if self._is_kvarn_mla:
-            # Fused KVarN-MLA decode: in-kernel 4-bit dequant of the packed
-            # latent. kv_c_and_k_pe_cache here is the packed uint8 cache
-            # [num_blocks, PAGE, REC]. q last dim = [latent(L) | rope(RP)].
-            NB, SC, ZP, RO, REC = kvarn_mla_layout(
-                self.kv_lora_rank, self.qk_rope_head_dim, self._kvarn_bits)
-            PAGE = kv_c_and_k_pe_cache.shape[1]
+            # Full-method KVarN-MLA decode (eager, correctness-first): per
+            # sequence, gather rotated keys from flushed int4 tiles (dequant) +
+            # staged fp16 partial blocks, dot the Hadamard-rotated query, softmax,
+            # then un-rotate the output. Triton dequant->stock-attention + graphs
+            # come after this validates.
+            R = self.kv_lora_rank
+            ROPE = self.qk_rope_head_dim
+            G = self._kvarn_group
+            bits = self._kvarn_bits
+            NB, SC, ZP, SR, RP, REC, _ = kvarn_mla_tile_layout(R, ROPE, G, bits)
+            H = self._kvarn_hadamard(R, q.device, q.dtype)
             bt = attn_metadata.decode.block_table
-            _kvarn_mla_decode_kernel[(B, q_num_heads)](
-                q, kv_c_and_k_pe_cache, bt, attn_metadata.decode.seq_lens, o, lse,
-                self.scale,
-                q.stride(0), q.stride(1), bt.stride(0), o.stride(0), o.stride(1),
-                lse.stride(0),
-                L=self.kv_lora_rank, RP=self.qk_rope_head_dim, NB=NB, REC=REC,
-                SCALE_OFF=SC, ZP_OFF=ZP, ROPE_OFF=RO, PAGE=PAGE, BLOCK_N=32,
-            )
+            seq_lens = attn_metadata.decode.seq_lens
+            flat = kv_c_and_k_pe_cache.view(-1, REC)
+            scale_attn = self.scale
+
+            def unpack(block_id):
+                rec = flat[block_id]
+                pk = rec[:NB].view(G, R // 2)
+                qd = torch.empty(G, R, dtype=torch.float32, device=q.device)
+                qd[:, 0::2] = (pk & 0xF).float()
+                qd[:, 1::2] = (pk >> 4).float()
+                sc = rec[SC:SC + R * 2].view(torch.float16).float()
+                zp = rec[ZP:ZP + R * 2].view(torch.float16).float()
+                pt = rec[SR:SR + G * 2].view(torch.float16).float()
+                deq_rot = (qd * sc[None, :] + zp[None, :]) * pt[:, None]  # [G,R] rot
+                rope = rec[RP:RP + G * ROPE * 2].view(torch.float16).reshape(G, ROPE)
+                return deq_rot, rope.float()
+
+            for b in range(B):
+                slen = int(seq_lens[b].item())
+                nblk = (slen + G - 1) // G
+                row = bt[b]
+                Krot_parts, Krope_parts = [], []
+                for j in range(nblk):
+                    bid = int(row[j].item())
+                    n = G if (j + 1) * G <= slen else (slen - j * G)
+                    st = self._kvarn_stage.get(bid)
+                    if st is not None:                       # staged fp16 partial
+                        krot = (st["lat"][:n].float() @ H)   # rotate to match
+                        krope = st["rope"][:n].float()
+                    else:                                    # flushed int4 tile
+                        d, rp = unpack(bid)
+                        krot, krope = d[:n], rp[:n]
+                    Krot_parts.append(krot)
+                    Krope_parts.append(krope)
+                Krot = torch.cat(Krot_parts, 0)              # [slen, R] rotated
+                Krope = torch.cat(Krope_parts, 0)            # [slen, ROPE]
+                qb = q[b].float()                            # [Hh, R+ROPE]
+                q_lat_rot = qb[:, :R] @ H
+                q_rope = qb[:, R:R + ROPE]
+                sc = (q_lat_rot @ Krot.t() + q_rope @ Krope.t()) * scale_attn
+                p = torch.softmax(sc, dim=-1)                # [Hh, slen]
+                acc_rot = p @ Krot                           # [Hh, R] = o@H
+                o[b] = (acc_rot @ H.t()).to(o.dtype)
+                lse[b] = torch.logsumexp(sc, dim=-1).to(lse.dtype)
             return o, lse
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
