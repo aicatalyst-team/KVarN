@@ -408,3 +408,16 @@ Euro..."). Prefill self-attn uses in-memory fp16 (recent-tokens-fp16, correct).
 Tasks 47+48 done. REMAINING: GSM8K full-method accuracy [running], then CUDA
 graphs (move flush to builder + dequant Triton kernel -> stock decode + sink/tail
 + capture metadata) -- the eager per-seq decode is correct but slow.
+
+## Update 18: full method correct; GSM8K collapse was the chunked-prefill gather
+Debugged the 0.67% GSM8K collapse:
+- Dequant-vs-fp16-ref in the live backend: max_abs 0.0001, rel 0.0002 -> int4
+  round-trip + cache persistence CORRECT.
+- Real-text multi-block single-chunk prompt: KVarN output IDENTICAL to FP16 ->
+  multi-block decode + flush + dequant all correct. ([785]*400 "garbage" earlier
+  was just a degenerate repeated-token prompt; FP16 does the same.)
+- Root cause of GSM8K collapse: CHUNKED prefill triggers _compute_prefill_context
+  -> the stale per-token _kvarn_mla_gather_dequant_kernel runs on the new TILE
+  cache -> garbage context. Fix (validate): enable_chunked_prefill=False (each
+  prompt single-chunk, no context gather). General fix (TODO): tile-aware context
+  gather that also reads staged partial blocks.

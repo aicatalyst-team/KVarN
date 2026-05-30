@@ -301,6 +301,11 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         rec[ZP:ZP + R * 2] = zp_abs.to(torch.float16).view(torch.uint8)
         rec[SR:SR + G * 2] = per_tok.to(torch.float16).view(torch.uint8)
         rec[RP:RP + G * ROPE * 2] = rope.reshape(-1).to(torch.float16).view(torch.uint8)
+        import os as _os
+        if _os.environ.get("KVARN_MLA_DBG"):
+            if not hasattr(self, "_dbg"):
+                self._dbg = {}
+            self._dbg[block_id] = ((lat.float() @ H).clone(), rope.float().clone())
 
     def do_kv_cache_update(self, kv_c_normed, k_pe, kv_cache, slot_mapping,
                            kv_cache_dtype, k_scale):
@@ -407,6 +412,16 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                         krope = st["rope"][:n].float()
                     else:                                    # flushed int4 tile
                         d, rp = unpack(bid)
+                        import os as _os
+                        if _os.environ.get("KVARN_MLA_DBG") and hasattr(self, "_dbg") and bid in self._dbg:
+                            dref, rref = self._dbg[bid]
+                            e = (d - dref).abs().max().item()
+                            if not hasattr(self, "_dbg_printed"):
+                                self._dbg_printed = True
+                                print(f"[DBG] flushed tile {bid}: dequant vs fp16-ref "
+                                      f"max_abs={e:.4f} rel={(d-dref).norm()/dref.norm():.4f}", flush=True)
+                            if _os.environ.get("KVARN_MLA_DBG") == "use_fp16":
+                                d, rp = dref, rref
                         krot, krope = d[:n], rp[:n]
                     Krot_parts.append(krot)
                     Krope_parts.append(krope)
