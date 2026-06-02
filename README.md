@@ -21,6 +21,33 @@
 
 ---
 
+## Why KVarN?
+
+KV-cache quantization usually comes with a catch. As the
+[vLLM TurboQuant blog](https://vllm.ai/blog/2026-05-11-turboquant) shows, existing
+methods buy extra KV-cache capacity but **give up throughput** (TurboQuant reports
+**40 to 52% lower throughput** for 2.3-3.7x capacity), and aggressive low-bit
+quantization also tends to **cost accuracy**. Losing both speed *and* quality is
+the main reason KV-cache quantization is rarely turned on in production.
+
+**KVarN is built to keep both.** On Qwen3-32B (AIME25, 16K-context burst, TP=2) it
+matches FP16 accuracy *and* throughput while delivering ~4× the KV-cache capacity:
+
+<p align="center">
+  <img src="imgs/pareto_qwen3-32b.png" alt="KVarN vs FP16 vs TurboQuant: accuracy, throughput and capacity" width="660">
+</p>
+
+| backend | accuracy (AIME25) | burst throughput (vs FP16) | KV-cache capacity (vs FP16) |
+|---|---|---|---|
+| FP16 | 59.4% | 1.00× | 1.0× |
+| TurboQuant 3-bit | 52.7% | 0.44× | 4.01× |
+| **KVarN** | **59.3%** | **1.07×** | **4.06×** |
+
+KVarN stays in the upper-right corner the blog's methods can't reach: **FP16-level
+accuracy, FP16-or-better throughput, and several times the context.**
+
+---
+
 ## Quickstart
 
 KVarN ships as a vLLM fork. Install it like vLLM, then select the KVarN KV-cache dtype.
