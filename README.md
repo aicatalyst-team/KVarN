@@ -80,18 +80,18 @@ vllm serve Qwen/Qwen3-32B --kv-cache-dtype kvarn_k4v2_g128 --block-size 128
 KVarN quantizes the KV cache one fixed-size token tile at a time, walking each tile
 through the four stages above:
 
-1. **Cache** — the raw fp16 KV tile (channels × tokens), straight from attention.
+1. **Cache**: the raw fp16 KV tile (channels × tokens), straight from attention.
 
-2. **Rotated Cache** — a **Hadamard rotation** along the channel dimension mixes
+2. **Rotated Cache**: a **Hadamard rotation** along the channel dimension mixes
    channels so that per-channel outliers are spread out, making the tile easier to
    quantize. The rotation is orthonormal, so attention scores are preserved.
 
-3. **Normalized Cache** — **iterative variance normalization** (Sinkhorn-like)
+3. **Normalized Cache**: **iterative variance normalization** (Sinkhorn-like)
    alternates column- and row-wise standard-deviation normalization in log space,
    equalizing variance across the tile and shrinking quantization error before any
    rounding happens.
 
-4. **Quantized Cache** — **asymmetric round-to-nearest** at low bit-width, with the
+4. **Quantized Cache**: **asymmetric round-to-nearest** at low bit-width, with the
    scales folded back in at read time (keys per channel, values per token).
 
 The shipped preset spends **more bits on keys than values** (`kvarn_k4v2_g128`:
