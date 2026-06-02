@@ -92,18 +92,13 @@ KVarN quantizes the KV cache one fixed-size token tile at a time, in three steps
    in at read time. Keys are quantized per channel, values per token.
 
 The shipped preset spends **more bits on keys than values** (`kvarn_k4v2_g128`:
-4-bit keys, 2-bit values). The reason is structural: key error propagates through
-the `softmax(QK^T)` exponentials, while value error is averaged out by the softmax
-weights, so keys carry most of the quantization sensitivity. The bit-widths are
-fully parameterized internally, so other presets are easy to add.
+4-bit keys, 2-bit values). We chose to release this configuration because it meets
+the strictest accuracy bar, matching FP16, that the most demanding production
+deployments and vLLM require, while still delivering throughput above FP16. The
+bit-widths are fully parameterized internally, so other presets are easy to add.
 
----
-
-## Roadmap
-
-- Additional bit-width presets (the quantizer and kernels are bit-width generic).
-- Variable page size (tile sizes other than 128).
-- Broader model coverage and benchmarks.
+> **Note:** the tile / page size is currently fixed at 128 (one vLLM block = one
+> KVarN tile). Support for other page sizes is coming soon.
 
 ---
 
