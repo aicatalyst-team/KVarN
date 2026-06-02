@@ -9,10 +9,6 @@
   <img src="imgs/logo_600.png" alt="KVarN" width="640">
 </p>
 
-<h3 align="center">Variance-Normalized KV-Cache Quantization for vLLM</h3>
-
-
-
 > ⚡️ **Built for agentic and long-context workloads.**
 
 > 💡 KVarN delivers **3-5x more KV-cache capacity** and **up to ~1.3x the throughput** of FP16, so you fit far longer contexts and serve more concurrent requests on the same GPU, with FP16-level accuracy.
