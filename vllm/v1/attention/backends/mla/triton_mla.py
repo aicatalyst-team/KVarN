@@ -1058,7 +1058,26 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             BLOCK_N = int(os.environ.get("KVARN_MLA_BLOCK_N", "64"))
             warps = int(os.environ.get("KVARN_MLA_WARPS", "8"))
             stages = int(os.environ.get("KVARN_MLA_STAGES", "2"))
-            NSPL = int(os.environ.get("KVARN_MLA_SPLITS", "16"))      # fixed for capture; 16 tuned (sm_120): +3.6% short-ctx, +8% @8K decode vs 4
+            # Split-K count (fixed at capture for graphs). Auto-scale with the
+            # model's max context: 16 was tuned at <=8K (sm_120: +3.6% short-ctx,
+            # +8% @8K vs 4), but at 16K (128 blocks) low-batch decode
+            # under-parallelizes -> bump to 32 (burst@16K B8: 0.82x -> 0.90x vs
+            # bf16; 64 gives no further gain). Targets ~4 blocks/split at max ctx.
+            # KVARN_MLA_SPLITS overrides.
+            _env_nspl = os.environ.get("KVARN_MLA_SPLITS")
+            if _env_nspl is not None:
+                NSPL = int(_env_nspl)
+            else:
+                _mb = getattr(self, "_kvarn_max_blocks", None)
+                if _mb is None:
+                    try:
+                        from vllm.config import get_current_vllm_config
+                        _ml = get_current_vllm_config().model_config.max_model_len
+                        _mb = (_ml + G - 1) // G
+                    except Exception:
+                        _mb = 999   # unknown -> assume long-ctx (more splits, safe)
+                    self._kvarn_max_blocks = _mb
+                NSPL = 16 if _mb <= 80 else (32 if _mb <= 256 else 64)
             if NSPL <= 1:
                 _kvarn_mla_tile_decode_kernel[(B, q_num_heads)](
                     Q, cache_flat, self._kvarn_lat_pool, self._kvarn_rope_pool,
