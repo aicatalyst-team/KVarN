@@ -842,8 +842,10 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         batch — replacing ~N separate eager flushes (each ~dozens of tiny
         launch-bound reduce/elementwise kernels + a per-iter host sync). Profiling
         showed the per-tile flush was 25% of GPU time + the cause of 66% util.
-        Sinkhorn here is sync-free (fixed iters, no imbalance best-tracking; it is
-        provably ~inert on the RMSNorm'd MLA latent so this is within noise)."""
+        Sinkhorn here is sync-free (torch.where best-tracking, no host `if`) and
+        numerically == the per-tile variance_normalize (NOT no-best-track: that
+        earlier 'inert' assumption was WRONG — it dropped GLM-4.7-Flash AIME to 20%
+        vs 47% per-tile; best-tracking restores it while keeping the batched speed)."""
         if not flush_list:
             return
         i0 = flush_list[0][0]
@@ -854,17 +856,37 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         lat = torch.stack([im._kvarn_lat_pool[s] for im, _, s in flush_list]).float()
         rope = torch.stack([im._kvarn_rope_pool[s] for im, _, s in flush_list])
         m = lat.transpose(1, 2).contiguous()                          # [N,R,G] (rotated)
-        # batched sync-free Sinkhorn (cols=R-axis dim1, rows=G-axis dim2)
-        ls_c = torch.zeros(m.shape[0], 1, G, device=m.device)
-        ls_r = torch.zeros(m.shape[0], R, 1, device=m.device)
+        N = m.shape[0]
+        # Batched log-domain Sinkhorn WITH best-so-far tracking, vectorized per-tile
+        # and SYNC-FREE (torch.where mask, not a host `if`). This matches the
+        # single-tile variance_normalize() EXACTLY (same iters/clamps + best-tracking)
+        # so the batched flush is numerically == the per-tile flush. The prior
+        # no-best-tracking version (took the LAST iter, not the lowest-imbalance one)
+        # corrupted accuracy at high batch: GLM-4.7-Flash AIME25 was 20% (batched) vs
+        # 47% (per-tile). cols=R-axis (dim1), rows=G-axis (dim2).
+        def _imb(t):                                                  # [N,R,G] -> [N]
+            sc = t.std(dim=1); sr = t.std(dim=2)
+            return (sc.amax(-1) / sc.amin(-1).clamp_min(1e-8)
+                    + sr.amax(-1) / sr.amin(-1).clamp_min(1e-8))
+        ls_c = torch.zeros(N, 1, G, device=m.device)
+        ls_r = torch.zeros(N, R, 1, device=m.device)
+        cur = m / ls_c.exp() / ls_r.exp()
+        imb_best = _imb(cur)
+        sc_best = ls_c.exp().clone(); sr_best = ls_r.exp().clone()
         for _ in range(iters):
-            cur = m / ls_c.exp() / ls_r.exp()
             cs = cur.std(dim=1, keepdim=True).clamp(1e-3, 1e3)
             ls_c = (ls_c + cs.log()).clip(-0.3, 10.0)
             cur = m / ls_c.exp() / ls_r.exp()
             rs = cur.std(dim=2, keepdim=True).clamp(1e-3, 1e3)
             ls_r = (ls_r + rs.log()).clip(-0.3, 10.0)
-        s_col = ls_c.exp(); s_row = ls_r.exp()                        # [N,1,G],[N,R,1]
+            cur = m / ls_c.exp() / ls_r.exp()
+            imb = _imb(cur)
+            better = imb <= imb_best                                  # [N]
+            mc = better.view(N, 1, 1)
+            sc_best = torch.where(mc, ls_c.exp(), sc_best)
+            sr_best = torch.where(mc, ls_r.exp(), sr_best)
+            imb_best = torch.where(better, imb, imb_best)
+        s_col = sc_best; s_row = sr_best                              # [N,1,G],[N,R,1]
         bal = m / s_col / s_row
         lo = bal.amin(2, keepdim=True); hi = bal.amax(2, keepdim=True)
         scale = ((hi - lo) / qmax).clamp_min(1e-8)                    # [N,R,1]
