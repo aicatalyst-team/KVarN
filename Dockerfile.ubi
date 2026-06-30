@@ -10,14 +10,14 @@ WORKDIR /opt/kvarn
 # Copy KVarN source
 COPY . .
 
-# Replace upstream vLLM with KVarN fork
-# Set SETUPTOOLS_SCM_PRETEND_VERSION since .git is excluded from build context
-# VLLM_USE_PRECOMPILED=1 uses the upstream precompiled wheel (skips CUDA compilation)
-RUN pip uninstall vllm -y 2>/dev/null || true && \
-    SETUPTOOLS_SCM_PRETEND_VERSION=0.23.0.post1 \
-    VLLM_USE_PRECOMPILED=1 \
-    pip install --no-cache-dir -e . && \
-    python3 -c "import vllm; print('vLLM version:', vllm.__version__)"
+# Overlay KVarN modifications on top of installed vLLM v0.23.0
+# Strategy: copy KVarN's modified Python files over the installed vLLM package
+# This preserves the compiled C extensions (vllm._C) from the base image
+RUN VLLM_SITE=$(python3 -c "import vllm; import os; print(os.path.dirname(vllm.__file__))") && \
+    echo "Overlaying KVarN files onto $VLLM_SITE" && \
+    cp -r /opt/kvarn/vllm/* "$VLLM_SITE/" && \
+    python3 -c "import vllm; print('vLLM version:', vllm.__version__)" && \
+    python3 -c "from vllm.v1.attention.backends.registry import AttentionBackendRegistry; print('KVarN backend registered:', 'KVARN' in [b.name for b in AttentionBackendRegistry])"
 
 # Copy the non-root entrypoint script (handles OpenShift arbitrary UIDs)
 COPY docker/entrypoints/vllm-nonroot-entrypoint.sh /usr/local/bin/vllm-nonroot-entrypoint.sh
