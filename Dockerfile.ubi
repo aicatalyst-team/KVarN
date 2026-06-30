@@ -11,10 +11,13 @@ WORKDIR /opt/kvarn
 COPY . .
 
 # Replace upstream vLLM with KVarN fork
-# KVarN uses VLLM_USE_PRECOMPILED=1 which skips CUDA compilation
-# since the base image already has compiled extensions
+# Set SETUPTOOLS_SCM_PRETEND_VERSION since .git is excluded from build context
+# VLLM_USE_PRECOMPILED=1 uses the upstream precompiled wheel (skips CUDA compilation)
 RUN pip uninstall vllm -y 2>/dev/null || true && \
-    VLLM_USE_PRECOMPILED=1 pip install --no-cache-dir -e . 2>&1 | tail -20
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.23.0.post1 \
+    VLLM_USE_PRECOMPILED=1 \
+    pip install --no-cache-dir -e . && \
+    python -c "import vllm; print('vLLM version:', vllm.__version__)"
 
 # Create non-root user for OpenShift compatibility (UID 1001, GID 0)
 RUN groupadd -g 1001 kvarn 2>/dev/null || true && \
