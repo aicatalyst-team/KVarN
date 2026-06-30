@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kvarn-model-cache
+  namespace: poc-kvarn
+  labels:
+    app: vllm-kvarn
+    autopoc.io/project: kvarn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

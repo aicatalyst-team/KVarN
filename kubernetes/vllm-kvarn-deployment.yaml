@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-kvarn
+  namespace: poc-kvarn
+  labels:
+    app: vllm-kvarn
+    autopoc.io/project: kvarn
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-kvarn
+  template:
+    metadata:
+      labels:
+        app: vllm-kvarn
+    spec:
+      containers:
+        - name: vllm-kvarn
+          image: quay.io/aicatalyst/kvarn-vllm:latest
+          imagePullPolicy: Always
+          args:
+            - "--model"
+            - "Qwen/Qwen2.5-1.5B"
+            - "--dtype"
+            - "float16"
+            - "--kv-cache-dtype"
+            - "kvarn_k4v2_g128"
+            - "--block-size"
+            - "128"
+            - "--port"
+            - "8000"
+            - "--max-model-len"
+            - "4096"
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: HF_HOME
+              value: "/home/vllm/.cache/huggingface"
+            - name: TRITON_CACHE_DIR
+              value: "/home/vllm/.triton"
+            - name: VLLM_CACHE_ROOT
+              value: "/home/vllm/.cache/vllm"
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "4000m"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "16Gi"
+              cpu: "8000m"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /home/vllm/.cache/huggingface
+            - name: triton-cache
+              mountPath: /home/vllm/.triton
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 300
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 600
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: kvarn-model-cache
+        - name: triton-cache
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
