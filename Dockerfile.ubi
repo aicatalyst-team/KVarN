@@ -19,20 +19,25 @@ RUN pip uninstall vllm -y 2>/dev/null || true && \
     pip install --no-cache-dir -e . && \
     python3 -c "import vllm; print('vLLM version:', vllm.__version__)"
 
-# Create non-root user for OpenShift compatibility (UID 1001, GID 0)
-RUN groupadd -g 1001 kvarn 2>/dev/null || true && \
-    useradd -u 1001 -g 0 -m -d /home/vllm kvarn 2>/dev/null || true && \
+# Copy the non-root entrypoint script (handles OpenShift arbitrary UIDs)
+COPY docker/entrypoints/vllm-nonroot-entrypoint.sh /usr/local/bin/vllm-nonroot-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/vllm-nonroot-entrypoint.sh
+
+# OpenShift compatibility: create vllm user, make /etc/passwd group-0 writable
+# for arbitrary UID injection, ensure all cache dirs are group-0 writable
+RUN useradd -u 2000 -g 0 -m -d /home/vllm vllm 2>/dev/null || true && \
     mkdir -p /home/vllm/.cache/huggingface /home/vllm/.triton /home/vllm/.cache/vllm && \
     chgrp -R 0 /home/vllm && chmod -R g=u /home/vllm && \
-    chgrp -R 0 /opt/kvarn && chmod -R g=u /opt/kvarn
+    chgrp -R 0 /opt/kvarn && chmod -R g=u /opt/kvarn && \
+    chmod g+w /etc/passwd
 
 EXPOSE 8000
 
-USER 1001
+USER 2000
 WORKDIR /home/vllm
 
 ENV HF_HOME=/home/vllm/.cache/huggingface
 ENV TRITON_CACHE_DIR=/home/vllm/.triton
 ENV VLLM_CACHE_ROOT=/home/vllm/.cache/vllm
 
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
