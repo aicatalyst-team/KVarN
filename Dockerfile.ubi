@@ -35,4 +35,4 @@ ENV HF_HOME=/home/vllm/.cache/huggingface
 ENV TRITON_CACHE_DIR=/home/vllm/.triton
 ENV VLLM_CACHE_ROOT=/home/vllm/.cache/vllm
 
-ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
