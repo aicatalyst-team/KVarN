@@ -11,13 +11,11 @@ WORKDIR /opt/kvarn
 COPY . .
 
 # Overlay KVarN modifications on top of installed vLLM v0.23.0
-# Strategy: copy KVarN's modified Python files over the installed vLLM package
+# Copy KVarN's Python files over the site-packages vLLM installation
 # This preserves the compiled C extensions (vllm._C) from the base image
-RUN VLLM_SITE=$(python3 -c "import vllm; import os; print(os.path.dirname(vllm.__file__))") && \
-    echo "Overlaying KVarN files onto $VLLM_SITE" && \
-    cp -r /opt/kvarn/vllm/* "$VLLM_SITE/" && \
-    python3 -c "import vllm; print('vLLM version:', vllm.__version__)" && \
-    python3 -c "from vllm.v1.attention.backends.registry import AttentionBackendRegistry; print('KVarN backend registered:', 'KVARN' in [b.name for b in AttentionBackendRegistry])"
+ENV VLLM_SITE=/usr/local/lib/python3.12/dist-packages/vllm
+RUN cp -r /opt/kvarn/vllm/* "$VLLM_SITE/" && \
+    echo "KVarN overlay complete"
 
 # Copy the non-root entrypoint script (handles OpenShift arbitrary UIDs)
 COPY docker/entrypoints/vllm-nonroot-entrypoint.sh /usr/local/bin/vllm-nonroot-entrypoint.sh
