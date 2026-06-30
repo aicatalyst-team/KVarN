@@ -1,0 +1,35 @@
+# KVarN: Variance-Normalized KV-Cache Quantization for vLLM
+# Uses official vLLM v0.23.0 image as base to avoid long CUDA compilation
+# Overlays KVarN modifications using editable install
+
+FROM vllm/vllm-openai:v0.23.0 AS base
+
+USER root
+WORKDIR /opt/kvarn
+
+# Copy KVarN source
+COPY . .
+
+# Replace upstream vLLM with KVarN fork
+# KVarN uses VLLM_USE_PRECOMPILED=1 which skips CUDA compilation
+# since the base image already has compiled extensions
+RUN pip uninstall vllm -y 2>/dev/null || true && \
+    VLLM_USE_PRECOMPILED=1 pip install --no-cache-dir -e . 2>&1 | tail -20
+
+# Create non-root user for OpenShift compatibility (UID 1001, GID 0)
+RUN groupadd -g 1001 kvarn 2>/dev/null || true && \
+    useradd -u 1001 -g 0 -m -d /home/vllm kvarn 2>/dev/null || true && \
+    mkdir -p /home/vllm/.cache/huggingface /home/vllm/.triton /home/vllm/.cache/vllm && \
+    chgrp -R 0 /home/vllm && chmod -R g=u /home/vllm && \
+    chgrp -R 0 /opt/kvarn && chmod -R g=u /opt/kvarn
+
+EXPOSE 8000
+
+USER 1001
+WORKDIR /home/vllm
+
+ENV HF_HOME=/home/vllm/.cache/huggingface
+ENV TRITON_CACHE_DIR=/home/vllm/.triton
+ENV VLLM_CACHE_ROOT=/home/vllm/.cache/vllm
+
+ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
